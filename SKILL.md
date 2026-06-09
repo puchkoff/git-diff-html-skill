@@ -1,5 +1,6 @@
 ---
 name: git-diff-html
+version: 1.0.0
 description: Render `git diff` as a side-by-side HTML page and open it in Safari. Use when the user says "/git-diff-html", "git-diff-html", "gdh", "git diff html safari", "show diff in safari", "diff html". Accepts the same args as `git diff` (e.g. `HEAD`, `--staged`, `main..HEAD`, a path).
 ---
 
@@ -29,7 +30,9 @@ The script prints the output path + file count, or `No changes to diff.` and exi
 
 ## What the page does
 
-- **Worktree banner** — fixed, top-center, light-blue (`#2b8def`); shows the worktree name (or repo basename outside a worktree).
+- **Top file list** — diff2html's own summary of changed files (`drawFileList: true`).
+- **Left file tree** — a fixed, full-height sidebar showing the changed files as a collapsible directory tree (single-child dir chains fold onto one row, so long paths stay readable). Click a folder to fold it, click a file to jump; a scrollspy highlights the file currently at the top of the viewport. The `☰` button (top-left) shows/hides the sidebar — the diff column and banner reflow to fill the space.
+- **Worktree banner** — fixed, top-center over the diff column, light-blue (`#2b8def`); shows the worktree name (or repo basename outside a worktree).
 - **Sticky file headers** — each file's header pins to the top of the window as you scroll; the next file's header pushes it off. The script overrides diff2html's `.d2h-wrapper { overflow-x: auto }` back to `visible`, because that overflow makes the wrapper a scroll container and silently kills `position: sticky`.
 
 ## Notes
