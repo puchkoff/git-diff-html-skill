@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" alt="git-diff-html" width="640">
+</p>
+
 # git-diff-html
 
 A [Claude Code](https://claude.com/claude-code) skill that renders `git diff` as a
@@ -41,6 +45,12 @@ the diff is empty.
 - Writes to `~/.local/share/git-diff-html/diff.html`, overwriting each run.
 - Read-only: runs `git diff` only — never stages, commits, or touches the working tree.
 - Self-contained except for the diff2html CDN bundle (needs network to render).
+
+## Requirements
+
+- macOS (opens Safari)
+- Python 3
+- Network access for the diff2html CDN bundle
 
 ## License
 
