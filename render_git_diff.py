@@ -25,6 +25,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+__version__ = "1.0.0"
+
 OUT = Path.home() / '.local' / 'share' / 'git-diff-html' / 'diff.html'
 MAX_FULL_FILE_BYTES = 2_000_000  # skip embedding huge files; the diff still renders
 
@@ -501,6 +503,9 @@ def _read_head(path: str) -> str | None:
 
 def main() -> int:
     args = sys.argv[1:]
+    if '--version' in args or '-V' in args:
+        print(f'git-diff-html {__version__}')
+        return 0
     open_it = True
     if '--no-open' in args:
         open_it = False

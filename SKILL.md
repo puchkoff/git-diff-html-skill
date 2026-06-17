@@ -1,5 +1,6 @@
 ---
 name: git-diff-html
+version: 1.0.0
 description: Render `git diff` as an HTML page (inline/unified view by default, like GitHub) and open it in Safari. Use when the user says "/git-diff-html", "git-diff-html", "/git-diff", "git-diff", "gdh", "show the diff visually", "open diff in browser", "show diff in safari", "diff html", or asks to visualize current changes. Accepts the same args as `git diff` (e.g. `HEAD`, `--staged`, `main..HEAD`, a path), plus `--side-by-side` for the two-pane view.
 ---
 
