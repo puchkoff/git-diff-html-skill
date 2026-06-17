@@ -11,6 +11,12 @@ It captures the diff, builds a self-contained HTML page with
 [diff2html](https://diff2html.xyz/) (loaded from CDN), adds a light-blue worktree
 banner plus sticky per-file headers, and launches Safari.
 
+## Preview
+
+<p align="center">
+  <img src="docs/screenshot.svg" alt="Example git-diff-html output (illustrative mockup)" width="900">
+</p>
+
 ## Install
 
 Copy the skill into your Claude Code skills directory:

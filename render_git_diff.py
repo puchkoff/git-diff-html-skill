@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Render `git diff` as a self-contained side-by-side HTML page and open it.
+"""Render `git diff` as a self-contained HTML page and open it.
 
 Standalone — no MCP server. Captures a unified diff, builds an HTML page that
 renders it client-side with diff2html (loaded from CDN), injects a light-blue
 worktree banner and sticky per-file headers, writes the page, and opens it in
-Safari on macOS.
+Safari on macOS. Defaults to an inline (unified, GitHub-style) view;
+--side-by-side switches to the two-pane view.
 
 Usage:
-    render_git_diff.py [git diff args...]   # default: HEAD
+    render_git_diff.py [git diff args...]   # default: HEAD, inline view
     render_git_diff.py main..HEAD -- apps/frontend
     render_git_diff.py --staged
+    render_git_diff.py --side-by-side HEAD   # two-pane view instead of inline
     render_git_diff.py --no-open HEAD        # write the file, don't open it
 
 Runs plain `git` directly, so it is not intercepted by the rtk Bash hook.
@@ -18,11 +20,13 @@ Runs plain `git` directly, so it is not intercepted by the rtk Bash hook.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 OUT = Path.home() / '.local' / 'share' / 'git-diff-html' / 'diff.html'
+MAX_FULL_FILE_BYTES = 2_000_000  # skip embedding huge files; the diff still renders
 
 PAGE = """<!doctype html>
 <html lang="en">
@@ -31,7 +35,9 @@ PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>git diff{title_suffix}</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/diff2html/bundles/css/diff2html.min.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github.min.css" />
 <script src="https://cdn.jsdelivr.net/npm/diff2html/bundles/js/diff2html-ui.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
 <style>
   :root {{ --nav-w: 270px; }}
   body {{ margin: 0; background: #fff;
@@ -96,6 +102,52 @@ PAGE = """<!doctype html>
   /* Nav gone → content fills the width; indent it clear of the fixed toggle. */
   body.gdh-nav-hidden #diff {{ margin-left: 0; padding-left: 44px; }}
   body.gdh-nav-hidden #wt-banner {{ left: 50%; }}
+  /* Full-file viewer: button per file header + modal popup. */
+  .gdh-viewbtn {{
+    margin-left: 10px; padding: 1px 8px; font-size: 11px; line-height: 1.6;
+    border: 1px solid #cdd3db; border-radius: 5px; background: #fff; color: #2b8def;
+    cursor: pointer; vertical-align: 1px;
+  }}
+  .gdh-viewbtn:hover {{ background: #eef2ff; }}
+  #gdh-modal {{
+    position: fixed; inset: 0; z-index: 10000; background: rgba(15, 23, 42, .45);
+    display: flex; align-items: center; justify-content: center;
+  }}
+  #gdh-modal[hidden] {{ display: none; }}
+  #gdh-modal-box {{
+    width: min(1100px, 94vw); height: 90vh; background: #fff; border-radius: 10px;
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, .25);
+  }}
+  #gdh-modal-head {{
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+    border-bottom: 1px solid #e3e6eb; background: #f7f8fa;
+  }}
+  #gdh-modal-path {{
+    flex: 1; font: 600 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #1f2430; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }}
+  #gdh-modal-head button {{
+    padding: 2px 9px; font-size: 11px; border: 1px solid #cdd3db; border-radius: 5px;
+    background: #fff; color: #2b8def; cursor: pointer;
+  }}
+  #gdh-modal-head button:hover {{ background: #eef2ff; }}
+  #gdh-modal-body {{ flex: 1; overflow: auto; }}
+  /* Per-line table so changed-line backgrounds span the full scroll width. */
+  .gdh-code {{ display: table; min-width: 100%; border-collapse: collapse;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }}
+  .gdh-line {{ display: table-row; }}
+  .gdh-line.gdh-add {{ background: #e6ffec; }}
+  .gdh-line.gdh-add .gdh-ln {{ background: #ccffd8; }}
+  .gdh-line.gdh-del .gdh-ln, .gdh-line.gdh-del .gdh-lc {{
+    box-shadow: inset 0 2px 0 #f4a8a8;       /* red strip = lines removed above this one */
+  }}
+  .gdh-ln {{
+    display: table-cell; position: sticky; left: 0; min-width: 3em;
+    padding: 0 8px 0 14px; text-align: right; color: #9aa3af;
+    user-select: none; background: #fafbfc; border-right: 1px solid #eceff3;
+  }}
+  .gdh-lc {{ display: table-cell; white-space: pre; width: 100%; padding: 0 16px 0 12px; }}
 </style>
 </head>
 <body class="gdh-nav-hidden">
@@ -103,14 +155,26 @@ PAGE = """<!doctype html>
 <button id="gdh-toggle" title="Show / hide file tree">&#9776;</button>
 <nav id="gdh-nav"><div class="gdh-nav-title">Files</div><ul id="gdh-nav-list"></ul></nav>
 <div id="diff"></div>
+<div id="gdh-modal" hidden>
+  <div id="gdh-modal-box">
+    <div id="gdh-modal-head">
+      <span id="gdh-modal-path"></span>
+      <button id="gdh-modal-newtab" title="Open this file in a new tab">Open in new tab ⧉</button>
+      <button id="gdh-modal-close" title="Close (Esc)">✕</button>
+    </div>
+    <div id="gdh-modal-body"></div>
+  </div>
+</div>
 <script>
   const diffString = JSON.parse({diff_json});
+  const fullFiles = JSON.parse({files_json});
+  const changedLines = JSON.parse({changed_json});
   const ui = new Diff2HtmlUI(document.getElementById('diff'), diffString, {{
     drawFileList: true,
     fileListToggle: true,
     fileListStartVisible: true,
     matching: 'lines',
-    outputFormat: 'side-by-side',
+    outputFormat: '{output_format}',
     highlight: true,
   }});
   ui.draw();
@@ -197,6 +261,128 @@ PAGE = """<!doctype html>
       document.body.classList.toggle('gdh-nav-hidden');
     }});
   }})();
+
+  // Full-file viewer: a "Full file" button on each file header opens the whole
+  // file (embedded at render time) in a highlight.js popup; ⌘/Ctrl-click or the
+  // modal's "Open in new tab" renders it as a standalone blob page instead.
+  (function fullFileViewer() {{
+    if (typeof hljs === 'undefined') return;   // CDN blocked → diff still works
+    const LANG = {{
+      tsx: 'typescript', ts: 'typescript', jsx: 'javascript', mjs: 'javascript',
+      cjs: 'javascript', py: 'python', rs: 'rust', kt: 'kotlin', sh: 'bash',
+      zsh: 'bash', yml: 'yaml', md: 'markdown'
+    }};
+    function esc(s) {{
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }}
+    // Split highlighted HTML into lines, re-balancing <span> tags that hljs
+    // lets straddle newlines (multi-line strings/comments).
+    function splitHighlighted(html) {{
+      const out = [];
+      const open = [];
+      html.split('\\n').forEach(function (line) {{
+        const prefix = open.join('');
+        const re = /<span[^>]*>|<\\/span>/g;
+        let m;
+        while ((m = re.exec(line))) {{
+          if (m[0] === '</span>') open.pop(); else open.push(m[0]);
+        }}
+        out.push(prefix + line + '</span>'.repeat(open.length));
+      }});
+      return out;
+    }}
+    function codeBlock(path, content) {{
+      const ext = (path.split('.').pop() || '').toLowerCase();
+      const lang = LANG[ext] || ext;
+      let value;
+      try {{
+        value = hljs.getLanguage(lang)
+          ? hljs.highlight(content, {{ language: lang }}).value
+          : hljs.highlightAuto(content).value;
+      }} catch (err) {{ value = esc(content); }}
+      const lines = splitHighlighted(value);
+      if (content.endsWith('\\n')) lines.pop();
+      const marks = changedLines[path] || {{}};
+      const added = new Set(marks.added || []);
+      const deleted = new Set(marks.deleted || []);
+      let rows = '';
+      for (let i = 0; i < lines.length; i++) {{
+        const n = i + 1;
+        let cls = 'gdh-line';
+        if (added.has(n)) cls += ' gdh-add';
+        if (deleted.has(n)) cls += ' gdh-del';
+        rows += '<div class="' + cls + '"><span class="gdh-ln">' + n +
+          '</span><span class="gdh-lc">' + (lines[i] || '\\u200b') + '</span></div>';
+      }}
+      return '<div class="gdh-code">' + rows + '</div>';
+    }}
+
+    const modal = document.getElementById('gdh-modal');
+    const modalBody = document.getElementById('gdh-modal-body');
+    const modalPath = document.getElementById('gdh-modal-path');
+    let currentPath = null;
+    function openModal(path) {{
+      currentPath = path;
+      modalPath.textContent = path;
+      modalBody.innerHTML = codeBlock(path, fullFiles[path]);
+      modal.hidden = false;
+      modalBody.scrollTop = 0;
+    }}
+    function closeModal() {{
+      modal.hidden = true;
+      modalBody.innerHTML = '';
+      currentPath = null;
+    }}
+    // Duplicate of the page's .gdh-code styles — the blob tab is a fresh document.
+    const TAB_CSS =
+      'body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,sans-serif}}' +
+      '.gdh-filehead{{position:sticky;top:0;padding:8px 14px;background:#f7f8fa;' +
+      'border-bottom:1px solid #e3e6eb;font:600 12.5px/1.4 ui-monospace,Menlo,monospace;color:#1f2430}}' +
+      '.gdh-code{{display:table;min-width:100%;border-collapse:collapse;' +
+      'font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}}' +
+      '.gdh-line{{display:table-row}}' +
+      '.gdh-line.gdh-add{{background:#e6ffec}}' +
+      '.gdh-line.gdh-add .gdh-ln{{background:#ccffd8}}' +
+      '.gdh-line.gdh-del .gdh-ln,.gdh-line.gdh-del .gdh-lc{{box-shadow:inset 0 2px 0 #f4a8a8}}' +
+      '.gdh-ln{{display:table-cell;position:sticky;left:0;min-width:3em;' +
+      'padding:0 8px 0 14px;text-align:right;color:#9aa3af;user-select:none;' +
+      'background:#fafbfc;border-right:1px solid #eceff3}}' +
+      '.gdh-lc{{display:table-cell;white-space:pre;width:100%;padding:0 16px 0 12px}}';
+    function openTab(path) {{
+      const doc = '<!doctype html><html><head><meta charset="utf-8"><title>' + esc(path) +
+        '</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github.min.css">' +
+        '<style>' + TAB_CSS + '</style></head><body><div class="gdh-filehead">' + esc(path) +
+        '</div>' + codeBlock(path, fullFiles[path]) + '</body></html>';
+      const url = URL.createObjectURL(new Blob([doc], {{ type: 'text/html' }}));
+      window.open(url, '_blank');
+    }}
+
+    modal.addEventListener('click', function (e) {{ if (e.target === modal) closeModal(); }});
+    document.getElementById('gdh-modal-close').addEventListener('click', closeModal);
+    document.getElementById('gdh-modal-newtab').addEventListener('click', function () {{
+      if (currentPath) {{ const p = currentPath; closeModal(); openTab(p); }}
+    }});
+    document.addEventListener('keydown', function (e) {{
+      if (e.key === 'Escape' && !modal.hidden) closeModal();
+    }});
+
+    document.querySelectorAll('#diff .d2h-file-wrapper').forEach(function (w) {{
+      const nameEl = w.querySelector('.d2h-file-name');
+      if (!nameEl) return;
+      const path = nameEl.textContent.trim();
+      if (!(path in fullFiles)) return;   // binary, huge, or rename-display path
+      const btn = document.createElement('button');
+      btn.className = 'gdh-viewbtn';
+      btn.textContent = 'Full file';
+      btn.title = 'View whole file — click: popup, ⌘-click: new tab';
+      btn.addEventListener('click', function (e) {{
+        if (e.metaKey || e.ctrlKey) openTab(path); else openModal(path);
+      }});
+      const header = w.querySelector('.d2h-file-header');
+      const nameWrap = header && header.querySelector('.d2h-file-name-wrapper');
+      (nameWrap || header || w).appendChild(btn);
+    }});
+  }})();
 </script>
 </body>
 </html>
@@ -215,9 +401,9 @@ def capture_diff(args: list[str]) -> str:
     return result.stdout
 
 
-def worktree_name() -> str:
+def repo_root() -> str:
     try:
-        root = subprocess.run(
+        return subprocess.run(
             ['git', 'rev-parse', '--show-toplevel'],
             capture_output=True,
             text=True,
@@ -225,10 +411,92 @@ def worktree_name() -> str:
         ).stdout.strip()
     except subprocess.CalledProcessError:
         return ''
+
+
+def worktree_name(root: str) -> str:
+    if not root:
+        return ''
     marker = '/.claude/worktrees/'
     if marker in root:
         return root.split(marker, 1)[1].split('/', 1)[0]
     return Path(root).name
+
+
+def new_side_paths(diff: str) -> list[str]:
+    """New-side paths from `diff --git a/<old> b/<new>` lines (quoted paths skipped)."""
+    paths = []
+    for line in diff.splitlines():
+        if not line.startswith('diff --git '):
+            continue
+        rest = line[len('diff --git ') :]
+        idx = rest.rfind(' b/')
+        if idx != -1:
+            paths.append(rest[idx + 3 :])
+    return paths
+
+
+HUNK_RE = re.compile(r'@@ -\d+(?:,\d+)? \+(\d+)')
+
+
+def changed_lines(diff: str) -> dict[str, dict[str, list[int]]]:
+    """Per new-side path: 'added' = line numbers of + lines, 'deleted' = the
+    line right after a removal (so pure deletions stay visible)."""
+    out: dict[str, dict[str, list[int]]] = {}
+    cur: dict[str, list[int]] | None = None
+    in_hunk = False
+    new_ln = 0
+    for line in diff.splitlines():
+        if line.startswith('diff --git '):
+            rest = line[len('diff --git ') :]
+            idx = rest.rfind(' b/')
+            cur = out.setdefault(rest[idx + 3 :], {'added': [], 'deleted': []}) if idx != -1 else None
+            in_hunk = False
+        elif line.startswith('@@') and cur is not None:
+            m = HUNK_RE.match(line)
+            if m:
+                new_ln = int(m.group(1))
+                in_hunk = True
+        elif in_hunk and cur is not None:
+            if line.startswith('+'):
+                cur['added'].append(new_ln)
+                new_ln += 1
+            elif line.startswith('-'):
+                if not cur['deleted'] or cur['deleted'][-1] != new_ln:
+                    cur['deleted'].append(new_ln)
+            elif not line.startswith('\\'):  # context; '\ No newline…' counts nothing
+                new_ln += 1
+    return out
+
+
+def collect_full_files(paths: list[str], root: str) -> dict[str, str]:
+    """Full text per path for the in-page viewer: worktree first, HEAD for deleted files."""
+    out: dict[str, str] = {}
+    for path in dict.fromkeys(paths):
+        text = _read_worktree(Path(root, path) if root else Path(path))
+        if text is None:
+            text = _read_head(path)
+        if text is not None:
+            out[path] = text
+    return out
+
+
+def _read_worktree(file: Path) -> str | None:
+    try:
+        if not file.is_file() or file.stat().st_size > MAX_FULL_FILE_BYTES:
+            return None
+        return file.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _read_head(path: str) -> str | None:
+    result = subprocess.run(['git', 'show', f'HEAD:{path}'], capture_output=True, check=False)
+    if result.returncode != 0 or len(result.stdout) > MAX_FULL_FILE_BYTES:
+        return None
+    try:
+        return result.stdout.decode('utf-8')
+    except UnicodeDecodeError:
+        return None
 
 
 def main() -> int:
@@ -237,6 +505,12 @@ def main() -> int:
     if '--no-open' in args:
         open_it = False
         args = [a for a in args if a != '--no-open']
+    # Inline (unified, GitHub-style) is the default; --side-by-side opts into
+    # the two-pane view. Accept --inline too as an explicit no-op alias.
+    output_format = 'line-by-line'
+    if '--side-by-side' in args:
+        output_format = 'side-by-side'
+    args = [a for a in args if a not in ('--side-by-side', '--inline')]
     if not args:
         args = ['HEAD']
 
@@ -245,17 +519,35 @@ def main() -> int:
         print('No changes to diff.')
         return 0
 
-    name = worktree_name()
+    root = repo_root()
+    name = worktree_name(root)
+    full_files = collect_full_files(new_side_paths(diff), root)
     # JSON-encode twice: once to embed safely in the page, once so JSON.parse in
-    # the browser rebuilds the exact string regardless of backticks/newlines.
-    diff_json = json.dumps(json.dumps(diff))
+    # the browser rebuilds the exact value regardless of backticks/newlines.
+    # Escape <, >, & to their \uXXXX forms so a file (or diff) containing the
+    # literal "</script>" can't close this inline <script> early and inject —
+    # JSON.parse still decodes the escapes back to the exact characters.
+    def embed(value: object) -> str:
+        return (
+            json.dumps(json.dumps(value))
+            .replace('<', '\\u003c')
+            .replace('>', '\\u003e')
+            .replace('&', '\\u0026')
+        )
+
+    diff_json = embed(diff)
+    files_json = embed(full_files)
+    changed_json = embed(changed_lines(diff))
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(
         PAGE.format(
             title_suffix=f' — {name}' if name else '',
             banner=name,
+            output_format=output_format,
             diff_json=diff_json,
+            files_json=files_json,
+            changed_json=changed_json,
         ),
         encoding='utf-8',
     )
