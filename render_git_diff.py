@@ -3,8 +3,9 @@
 
 Standalone — no MCP server. Captures a unified diff, builds an HTML page that
 renders it client-side with diff2html (loaded from CDN), injects a light-blue
-worktree banner and sticky per-file headers, writes the page, and opens it in
-Safari on macOS. Defaults to an inline (unified, GitHub-style) view;
+worktree banner and sticky per-file headers, writes the page, and opens it
+(Safari on macOS, the default browser elsewhere). Defaults to an inline
+(unified, GitHub-style) view;
 --side-by-side switches to the two-pane view.
 
 Usage:
@@ -23,6 +24,7 @@ import json
 import re
 import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 
 __version__ = "1.0.0"
@@ -560,7 +562,11 @@ def main() -> int:
     files = diff.count('\ndiff --git ') + diff.startswith('diff --git ')
     print(f'Wrote {OUT} ({files} file(s)).')
     if open_it:
-        subprocess.run(['open', '-a', 'Safari', str(OUT)], check=False)
+        if sys.platform == 'darwin':
+            # -g: open in background; never steal focus / foreground Safari.
+            subprocess.run(['open', '-g', '-a', 'Safari', str(OUT)], check=False)
+        else:
+            webbrowser.open(OUT.as_uri())
     return 0
 
 
